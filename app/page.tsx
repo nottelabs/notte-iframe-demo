@@ -8,29 +8,45 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
-  const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const progressFrame = useRef<number | null>(null);
 
-  // Smooth indeterminate progress: ramp toward 92% asymptotically while loading,
-  // then jump to 100% once the session is ready.
+  // The session endpoint now returns in ~400ms; fill almost all of the bar in
+  // that window, then hold until the response resolves.
   useEffect(() => {
-    if (loading) {
-      setProgress(4);
-      progressTimer.current = setInterval(() => {
-        setProgress((p) => p + (92 - p) * 0.07);
-      }, 120);
-    } else if (progressTimer.current) {
-      clearInterval(progressTimer.current);
-      progressTimer.current = null;
-      setProgress(100);
-      const t = setTimeout(() => setProgress(0), 400);
-      return () => clearTimeout(t);
-    }
-    return () => {
-      if (progressTimer.current) {
-        clearInterval(progressTimer.current);
-        progressTimer.current = null;
+    const clearProgressFrame = () => {
+      if (progressFrame.current !== null) {
+        cancelAnimationFrame(progressFrame.current);
+        progressFrame.current = null;
       }
     };
+
+    if (loading) {
+      const startedAt = performance.now();
+      const durationMs = 400;
+      const maxPendingProgress = 96;
+
+      const tick = () => {
+        const elapsed = performance.now() - startedAt;
+        const t = Math.min(elapsed / durationMs, 1);
+        const eased = 1 - Math.pow(1 - t, 3);
+        setProgress(Math.round(eased * maxPendingProgress));
+        if (t < 1) {
+          progressFrame.current = requestAnimationFrame(tick);
+        }
+      };
+
+      progressFrame.current = requestAnimationFrame(tick);
+    } else {
+      clearProgressFrame();
+      const completeTimer = setTimeout(() => setProgress(100), 0);
+      const t = setTimeout(() => setProgress(0), 400);
+      return () => {
+        clearTimeout(completeTimer);
+        clearTimeout(t);
+      };
+    }
+
+    return clearProgressFrame;
   }, [loading]);
 
   async function startSession() {
@@ -65,10 +81,6 @@ export default function Home() {
     }
   }
 
-  // Skip the broken `console.notte.cc/static/viewer` wrapper (its embed-minimal
-  // mode uses h-full which collapses inside an iframe) and point straight at
-  // the underlying CDP inspector. The wrapper is just an authentication shim
-  // that appends the JWT to the WS URL — we replicate that here.
   const embeddedUrl = (() => {
     if (!viewerUrl) return null;
     try {
@@ -76,11 +88,12 @@ export default function Home() {
       const ws = u.searchParams.get("ws");
       const jwt = u.searchParams.get("jwt");
       if (!ws || !jwt) return viewerUrl;
-      const wsUrl = new URL(ws);
-      const wsPath = wsUrl.pathname.replace(/\/debug\/recording$/, "/debug");
-      const wsValue = `${wsUrl.host}${wsPath}?token=${jwt}`;
-      const wsParam = wsUrl.protocol === "wss:" ? "wss" : "ws";
-      return `${u.origin}/cdp-viewer/inspector.html?${wsParam}=${encodeURIComponent(wsValue)}&interactive=true`;
+      const embedded = new URL("/static/viewer", u.origin);
+      embedded.searchParams.set("ws", ws);
+      embedded.searchParams.set("jwt", jwt);
+      embedded.searchParams.set("mode", "embed-minimal");
+      embedded.searchParams.set("interactive", "1");
+      return embedded.toString();
     } catch {
       return viewerUrl;
     }
